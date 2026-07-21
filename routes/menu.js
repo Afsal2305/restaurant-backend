@@ -131,4 +131,74 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
   }
 });
 
+router.get('/:id/variants', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM menu_item_variants WHERE menu_item_id = ? ORDER BY price_adjustment ASC', [req.params.id]);
+    res.json(rows);
+  } catch (error) {
+    console.error('Get variants error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/:id/variants', authenticateAdmin, async (req, res) => {
+  try {
+    const { name, price_adjustment } = req.body;
+    if (!name) return res.status(400).json({ error: 'Variant name is required' });
+    const [result] = await pool.query(
+      'INSERT INTO menu_item_variants (menu_item_id, name, price_adjustment) VALUES (?, ?, ?)',
+      [req.params.id, name, parseFloat(price_adjustment || 0)]
+    );
+    res.status(201).json({ message: 'Variant added', id: result.insertId });
+  } catch (error) {
+    console.error('Add variant error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.delete('/variants/:variantId', authenticateAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM menu_item_variants WHERE id = ?', [req.params.variantId]);
+    res.json({ message: 'Variant deleted' });
+  } catch (error) {
+    console.error('Delete variant error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.get('/:id/addons', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM menu_item_addons WHERE menu_item_id = ? ORDER BY name ASC', [req.params.id]);
+    res.json(rows);
+  } catch (error) {
+    console.error('Get addons error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/:id/addons', authenticateAdmin, async (req, res) => {
+  try {
+    const { name, price } = req.body;
+    if (!name) return res.status(400).json({ error: 'Addon name is required' });
+    const [result] = await pool.query(
+      'INSERT INTO menu_item_addons (menu_item_id, name, price) VALUES (?, ?, ?)',
+      [req.params.id, name, parseFloat(price || 0)]
+    );
+    res.status(201).json({ message: 'Addon added', id: result.insertId });
+  } catch (error) {
+    console.error('Add addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.delete('/addons/:addonId', authenticateAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM menu_item_addons WHERE id = ?', [req.params.addonId]);
+    res.json({ message: 'Addon deleted' });
+  } catch (error) {
+    console.error('Delete addon error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;

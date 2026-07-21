@@ -97,7 +97,12 @@ router.get('/orders/completed', authenticateWaiter, async (req, res) => {
   try {
     const waiterId = req.user.id;
     const [orders] = await pool.query(
-      `SELECT o.*, t.table_number 
+      `SELECT o.*, t.table_number,
+              CASE
+                WHEN o.order_type IN ('parcel', 'take_away', 'delivery') THEN 'paid'
+                WHEN EXISTS (SELECT 1 FROM payments WHERE order_id = o.id AND status = 'paid') THEN 'paid'
+                ELSE 'unpaid'
+              END as payment_status
        FROM orders o 
        INNER JOIN tables_ t ON o.table_id = t.id 
        WHERE o.waiter_id = ? AND o.status = 'completed' 

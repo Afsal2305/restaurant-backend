@@ -78,9 +78,9 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
 router.put('/:id/status', authenticateAdmin, async (req, res) => {
   try {
     const { status } = req.body;
-    const validStatuses = ['open', 'ready_to_pay', 'closed'];
+    const validStatuses = ['open', 'occupied', 'ready_to_pay', 'closed', 'reserved', 'cleaning'];
     if (!validStatuses.includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
+      return res.status(400).json({ error: 'Invalid status. Allowed: open, occupied, ready_to_pay, closed, reserved, cleaning' });
     }
     await pool.query('UPDATE tables_ SET status = ? WHERE id = ?', [status, req.params.id]);
     res.json({ message: 'Table status updated' });

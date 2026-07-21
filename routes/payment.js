@@ -98,6 +98,11 @@ router.post('/process', authenticateAdmin, async (req, res) => {
         error: `Payment amount (₹${paidAmount.toFixed(2)}) is less than the total due (₹${actualTotal.toFixed(2)})`
       });
     }
+    if (paidAmount > actualTotal * 1.5) {
+      return res.status(400).json({
+        error: `Payment amount (₹${paidAmount.toFixed(2)}) exceeds reasonable limit for total (₹${actualTotal.toFixed(2)})`
+      });
+    }
 
     const latestUnpaidOrderId = orders.length > 0 ? orders[0].id : order_id;
     const [result] = await pool.query(
@@ -132,32 +137,57 @@ router.get('/', authenticateAdmin, async (req, res) => {
 router.get('/all-tables', authenticateAdmin, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT * FROM tables_ ORDER BY CAST(table_number AS UNSIGNED)'
+      `SELECT t.*,
+        COALESCE(bills.bill_total, 0) AS bill_total,
+        lo.id AS lo_id, lo.subtotal AS lo_subtotal, lo.tax_amount AS lo_tax_amount,
+        lo.total AS lo_total, lo.created_at AS lo_created_at,
+        p.id AS p_id, p.total AS p_total, p.online_amount AS p_online_amount,
+        p.offline_amount AS p_offline_amount, p.status AS p_status,
+        p.created_at AS p_created_at
+      FROM tables_ t
+      LEFT JOIN (
+        SELECT table_id, SUM(total) AS bill_total
+        FROM orders
+        WHERE status = 'completed'
+        AND id NOT IN (SELECT order_id FROM payments WHERE status = 'paid' AND order_id IS NOT NULL)
+        GROUP BY table_id
+      ) bills ON bills.table_id = t.id
+      LEFT JOIN (
+        SELECT o1.* FROM orders o1
+        WHERE o1.status = 'completed'
+        AND o1.id NOT IN (SELECT order_id FROM payments WHERE status = 'paid' AND order_id IS NOT NULL)
+        AND o1.id = (
+          SELECT o2.id FROM orders o2
+          WHERE o2.table_id = o1.table_id AND o2.status = 'completed'
+          AND o2.id NOT IN (SELECT order_id FROM payments WHERE status = 'paid' AND order_id IS NOT NULL)
+          ORDER BY o2.created_at DESC LIMIT 1
+        )
+      ) lo ON lo.table_id = t.id
+      LEFT JOIN (
+        SELECT p1.* FROM payments p1
+        WHERE p1.id = (SELECT MAX(p2.id) FROM payments p2 WHERE p2.table_id = p1.table_id)
+      ) p ON p.table_id = t.id
+      ORDER BY CAST(t.table_number AS UNSIGNED)`
     );
-    const result = [];
-    for (const table of rows) {
-      const [orders] = await pool.query(
-        `SELECT o.* FROM orders o
-         WHERE o.table_id = ? AND o.status = 'completed'
-         AND o.id NOT IN (SELECT p.order_id FROM payments p WHERE p.table_id = ? AND p.status = 'paid' AND p.order_id IS NOT NULL)
-         ORDER BY o.created_at DESC`,
-        [table.id, table.id]
-      );
-      const [payments] = await pool.query(
-        'SELECT * FROM payments WHERE table_id = ? ORDER BY created_at DESC LIMIT 1',
-        [table.id]
-      );
-      let billTotal = 0;
-      for (const order of orders) {
-        billTotal += parseFloat(order.total || 0);
-      }
-      result.push({
-        ...table,
-        latest_order: orders.length > 0 ? orders[0] : null,
-        payment: payments.length > 0 ? payments[0] : null,
-        bill_total: billTotal
-      });
-    }
+    const result = rows.map(row => ({
+      id: row.id,
+      table_number: row.table_number,
+      capacity: row.capacity,
+      status: row.status,
+      reservation_name: row.reservation_name,
+      reservation_time: row.reservation_time,
+      merged_with: row.merged_with,
+      created_at: row.created_at,
+      bill_total: row.bill_total,
+      latest_order: row.lo_id ? {
+        id: row.lo_id, subtotal: row.lo_subtotal, tax_amount: row.lo_tax_amount,
+        total: row.lo_total, created_at: row.lo_created_at
+      } : null,
+      payment: row.p_id ? {
+        id: row.p_id, total: row.p_total, online_amount: row.p_online_amount,
+        offline_amount: row.p_offline_amount, status: row.p_status, created_at: row.p_created_at
+      } : null
+    }));
     res.json(result);
   } catch (error) {
     console.error('Get all tables with payment info error:', error);
