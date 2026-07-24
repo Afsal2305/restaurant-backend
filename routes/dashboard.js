@@ -5,13 +5,17 @@ const { authenticateAdmin } = require('../middleware/auth');
 
 router.get('/stats', authenticateAdmin, async (req, res) => {
   try {
-    const [totalEarnings] = await pool.query(
-      'SELECT COALESCE(SUM(total), 0) as total FROM payments WHERE status = ?',
-      ['paid']
+    const [tableEarnings] = await pool.query(
+      "SELECT COALESCE(SUM(total), 0) as total FROM payments WHERE status = 'paid' AND type = 'table'"
     );
-    const [parcelEarnings] = await pool.query(
+    const [parcelBillsEarnings] = await pool.query(
       "SELECT COALESCE(SUM(total), 0) as total FROM parcel_bills WHERE payment_status = 'paid'"
     );
+    const [parcelPayments] = await pool.query(
+      "SELECT COALESCE(SUM(total), 0) as total FROM payments WHERE status = 'paid' AND type = 'parcel'"
+    );
+    const tableTotal = parseFloat(tableEarnings[0].total);
+    const parcelTotal = parseFloat(parcelBillsEarnings[0].total) + parseFloat(parcelPayments[0].total);
     const [totalOrders] = await pool.query('SELECT COUNT(*) as count FROM orders');
     const [activeOrders] = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status = 'active'");
     const [completedOrders] = await pool.query("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'");
@@ -20,14 +24,16 @@ router.get('/stats', authenticateAdmin, async (req, res) => {
     const [readyToPayTables] = await pool.query("SELECT COUNT(*) as count FROM tables_ WHERE status = 'ready_to_pay'");
     const [totalWaiters] = await pool.query('SELECT COUNT(*) as count FROM waiters');
     const [totalMenuItems] = await pool.query('SELECT COUNT(*) as count FROM menu_items');
+    const [todayOrders] = await pool.query("SELECT COUNT(*) as count FROM orders WHERE DATE(created_at) = CURDATE()");
 
     res.json({
-      total_earnings: parseFloat(totalEarnings[0].total) + parseFloat(parcelEarnings[0].total),
-      table_earnings: parseFloat(totalEarnings[0].total),
-      parcel_earnings: parseFloat(parcelEarnings[0].total),
+      total_earnings: tableTotal + parcelTotal,
+      table_earnings: tableTotal,
+      parcel_earnings: parcelTotal,
       total_orders: totalOrders[0].count,
       active_orders: activeOrders[0].count,
       completed_orders: completedOrders[0].count,
+      today_orders: todayOrders[0].count,
       total_tables: totalTables[0].count,
       open_tables: openTables[0].count,
       ready_to_pay_tables: readyToPayTables[0].count,
@@ -44,13 +50,17 @@ router.get('/revenue/daily', authenticateAdmin, async (req, res) => {
   try {
     const [tableRevenue] = await pool.query(
       `SELECT DATE(created_at) as date, SUM(total) as total 
-       FROM payments WHERE status = 'paid' 
+       FROM payments WHERE status = 'paid' AND type = 'table'
        GROUP BY DATE(created_at) 
        ORDER BY date DESC LIMIT 30`
     );
     const [parcelRevenue] = await pool.query(
       `SELECT DATE(created_at) as date, SUM(total) as total 
-       FROM parcel_bills WHERE payment_status = 'paid' 
+       FROM (
+         SELECT created_at, total FROM parcel_bills WHERE payment_status = 'paid'
+         UNION ALL
+         SELECT created_at, total FROM payments WHERE status = 'paid' AND type = 'parcel'
+       ) combined
        GROUP BY DATE(created_at) 
        ORDER BY date DESC LIMIT 30`
     );
@@ -79,13 +89,17 @@ router.get('/revenue/monthly', authenticateAdmin, async (req, res) => {
   try {
     const [tableRevenue] = await pool.query(
       `SELECT DATE_FORMAT(created_at, '%Y-%m') as month, SUM(total) as total 
-       FROM payments WHERE status = 'paid' 
+       FROM payments WHERE status = 'paid' AND type = 'table'
        GROUP BY DATE_FORMAT(created_at, '%Y-%m') 
        ORDER BY month DESC LIMIT 12`
     );
     const [parcelRevenue] = await pool.query(
       `SELECT DATE_FORMAT(created_at, '%Y-%m') as month, SUM(total) as total 
-       FROM parcel_bills WHERE payment_status = 'paid' 
+       FROM (
+         SELECT created_at, total FROM parcel_bills WHERE payment_status = 'paid'
+         UNION ALL
+         SELECT created_at, total FROM payments WHERE status = 'paid' AND type = 'parcel'
+       ) combined
        GROUP BY DATE_FORMAT(created_at, '%Y-%m') 
        ORDER BY month DESC LIMIT 12`
     );
@@ -128,7 +142,7 @@ router.get('/revenue/daily-trend', authenticateAdmin, async (req, res) => {
               COALESCE(SUM(total), 0) as total_revenue,
               COUNT(*) as order_count
        FROM payments
-       WHERE status = 'paid' AND DATE_FORMAT(created_at, '%Y-%m-%d') >= ?
+       WHERE status = 'paid' AND type = 'table' AND DATE_FORMAT(created_at, '%Y-%m-%d') >= ?
        GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d')
        ORDER BY date ASC`,
       [startStr]
@@ -138,8 +152,12 @@ router.get('/revenue/daily-trend', authenticateAdmin, async (req, res) => {
       `SELECT DATE_FORMAT(created_at, '%Y-%m-%d') as date,
               COALESCE(SUM(total), 0) as total_revenue,
               COUNT(*) as order_count
-       FROM parcel_bills
-       WHERE payment_status = 'paid' AND DATE_FORMAT(created_at, '%Y-%m-%d') >= ?
+       FROM (
+         SELECT created_at, total FROM parcel_bills WHERE payment_status = 'paid'
+         UNION ALL
+         SELECT created_at, total FROM payments WHERE status = 'paid' AND type = 'parcel'
+       ) combined
+       WHERE DATE_FORMAT(created_at, '%Y-%m-%d') >= ?
        GROUP BY DATE_FORMAT(created_at, '%Y-%m-%d')
        ORDER BY date ASC`,
       [startStr]

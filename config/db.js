@@ -90,7 +90,7 @@ const createTables = async () => {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        table_id INT NOT NULL,
+        table_id INT DEFAULT NULL,
         waiter_id INT NOT NULL,
         status ENUM('active', 'completed') DEFAULT 'active',
         subtotal DECIMAL(10,2) DEFAULT 0.00,
@@ -253,6 +253,56 @@ const createTables = async () => {
       try {
         await connection.query(
           "INSERT INTO settings (setting_key, setting_value, category) VALUES ('migration_version', '2', 'system') ON DUPLICATE KEY UPDATE setting_value = '2'"
+        );
+      } catch (e) {}
+    }
+
+    if (migrationVersion < 3) {
+      try { await connection.query('ALTER TABLE order_items ADD COLUMN kot_sent_quantity INT NOT NULL DEFAULT 0 AFTER addon_names'); } catch (e) {}
+      try {
+        await connection.query(
+          `UPDATE order_items oi
+           SET oi.kot_sent_quantity = (
+             SELECT COALESCE(SUM(ki.quantity), 0)
+             FROM kot k
+             INNER JOIN kot_items ki ON k.id = ki.kot_id
+             WHERE k.order_id = oi.order_id AND ki.menu_item_id = oi.menu_item_id
+           )
+           WHERE EXISTS (
+             SELECT 1 FROM kot k
+             INNER JOIN kot_items ki ON k.id = ki.kot_id
+             WHERE k.order_id = oi.order_id AND ki.menu_item_id = oi.menu_item_id
+           )`
+        );
+      } catch (e) {}
+      try {
+        await connection.query(
+          "INSERT INTO settings (setting_key, setting_value, category) VALUES ('migration_version', '3', 'system') ON DUPLICATE KEY UPDATE setting_value = '3'"
+        );
+      } catch (e) {}
+    }
+
+    if (migrationVersion < 4) {
+      try { await connection.query("ALTER TABLE orders MODIFY COLUMN status ENUM('active', 'completed', 'cancelled') DEFAULT 'active'"); } catch (e) {}
+      try { await connection.query("ALTER TABLE kot MODIFY COLUMN status ENUM('pending', 'preparing', 'ready', 'served', 'cancelled') DEFAULT 'pending'"); } catch (e) {}
+      try { await connection.query('ALTER TABLE orders ADD COLUMN cancelled_by VARCHAR(200) DEFAULT NULL AFTER hold'); } catch (e) {}
+      try { await connection.query('ALTER TABLE orders ADD COLUMN cancelled_at DATETIME DEFAULT NULL AFTER cancelled_by'); } catch (e) {}
+      try { await connection.query('ALTER TABLE orders ADD COLUMN cancel_reason TEXT DEFAULT NULL AFTER cancelled_at'); } catch (e) {}
+      try { await connection.query('ALTER TABLE kot ADD COLUMN cancelled_by VARCHAR(200) DEFAULT NULL AFTER assigned_time'); } catch (e) {}
+      try { await connection.query('ALTER TABLE kot ADD COLUMN cancelled_at DATETIME DEFAULT NULL AFTER cancelled_by'); } catch (e) {}
+      try { await connection.query('ALTER TABLE kot ADD COLUMN cancel_reason TEXT DEFAULT NULL AFTER cancelled_at'); } catch (e) {}
+      try {
+        await connection.query(
+          "INSERT INTO settings (setting_key, setting_value, category) VALUES ('migration_version', '4', 'system') ON DUPLICATE KEY UPDATE setting_value = '4'"
+        );
+      } catch (e) {}
+    }
+
+    if (migrationVersion < 5) {
+      try { await connection.query('ALTER TABLE orders MODIFY COLUMN table_id INT DEFAULT NULL'); } catch (e) {}
+      try {
+        await connection.query(
+          "INSERT INTO settings (setting_key, setting_value, category) VALUES ('migration_version', '5', 'system') ON DUPLICATE KEY UPDATE setting_value = '5'"
         );
       } catch (e) {}
     }

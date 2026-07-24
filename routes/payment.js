@@ -134,6 +134,33 @@ router.get('/', authenticateAdmin, async (req, res) => {
   }
 });
 
+router.get('/parcel-bills', authenticateAdmin, async (req, res) => {
+  try {
+    const [orders] = await pool.query(
+      `SELECT o.*, w.name as waiter_name
+       FROM orders o
+       LEFT JOIN waiters w ON o.waiter_id = w.id
+       WHERE o.order_type = 'parcel' AND o.status = 'completed'
+       AND o.id NOT IN (SELECT order_id FROM payments WHERE status = 'paid' AND order_id IS NOT NULL)
+       ORDER BY o.created_at DESC`
+    );
+    for (const order of orders) {
+      const [items] = await pool.query(
+        `SELECT oi.*, m.name as menu_item_name, m.image as menu_item_image
+         FROM order_items oi
+         INNER JOIN menu_items m ON oi.menu_item_id = m.id
+         WHERE oi.order_id = ?`,
+        [order.id]
+      );
+      order.items = items;
+    }
+    res.json(orders);
+  } catch (error) {
+    console.error('Get parcel bills error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.get('/all-tables', authenticateAdmin, async (req, res) => {
   try {
     const [rows] = await pool.query(

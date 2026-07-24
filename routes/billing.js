@@ -145,6 +145,78 @@ router.post('/process-parcel-bill', authenticateAdmin, async (req, res) => {
   }
 });
 
+router.post('/process-parcel-order', authenticateAdmin, async (req, res) => {
+  try {
+    const { order_id, payment_method, cash_amount, upi_amount, card_amount, voucher_amount, gift_voucher_code, discount, discount_type, round_off } = req.body;
+
+    if (!order_id) {
+      return res.status(400).json({ error: 'Order ID is required' });
+    }
+
+    const [orderRows] = await pool.query('SELECT * FROM orders WHERE id = ? AND order_type = ?', [order_id, 'parcel']);
+    if (orderRows.length === 0) {
+      return res.status(404).json({ error: 'Parcel order not found' });
+    }
+
+    const [paymentRows] = await pool.query(
+      "SELECT * FROM payments WHERE order_id = ? AND status = 'paid'",
+      [order_id]
+    );
+    if (paymentRows.length > 0) {
+      return res.status(400).json({ error: 'Order is already paid' });
+    }
+
+    const order = orderRows[0];
+    const totalDue = parseFloat(order.total || 0) + parseFloat(order.delivery_charge || 0) + parseFloat(order.packing_charge || 0) + parseFloat(order.parcel_charge || 0);
+    const discAmt = parseFloat(discount || 0);
+    const ro = parseFloat(round_off || 0);
+    const grandTotal = totalDue - discAmt + ro;
+
+    const cashAmt = parseFloat(cash_amount || 0);
+    const upiAmt = parseFloat(upi_amount || 0);
+    const cardAmt = parseFloat(card_amount || 0);
+    const voucherAmt = parseFloat(voucher_amount || 0);
+    const paidAmount = cashAmt + upiAmt + cardAmt + voucherAmt;
+
+    if (paidAmount < grandTotal) {
+      return res.status(400).json({
+        error: `Payment amount (₹${paidAmount.toFixed(2)}) is less than the total due (₹${grandTotal.toFixed(2)})`
+      });
+    }
+
+    if (paidAmount > grandTotal * 1.5) {
+      return res.status(400).json({
+        error: `Payment amount (₹${paidAmount.toFixed(2)}) exceeds reasonable limit for total (₹${grandTotal.toFixed(2)})`
+      });
+    }
+
+    const billNumber = `BILL-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+
+    await pool.query(
+      `INSERT INTO payments (order_id, total, status, type, payment_method, cash_amount, upi_amount, card_amount, voucher_amount, gift_voucher_code, bill_number)
+       VALUES (?, ?, 'paid', 'parcel', ?, ?, ?, ?, ?, ?, ?)`,
+      [order_id, grandTotal, payment_method || 'cash', cashAmt, upiAmt, cardAmt, voucherAmt, gift_voucher_code || null, billNumber]
+    );
+
+    if (discAmt > 0 || ro !== 0) {
+      await pool.query(
+        'UPDATE orders SET discount = ?, discount_type = ?, round_off = ? WHERE id = ?',
+        [discAmt, discount_type || 'fixed', ro, order_id]
+      );
+    }
+
+    res.status(201).json({
+      message: 'Payment processed successfully',
+      total: grandTotal,
+      bill_number: billNumber,
+      change_due: Math.max(0, paidAmount - grandTotal)
+    });
+  } catch (error) {
+    console.error('Process parcel order payment error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.get('/kot-bills/:orderId', authenticateAdmin, async (req, res) => {
   try {
     const [orderRows] = await pool.query('SELECT * FROM orders WHERE id = ?', [req.params.orderId]);

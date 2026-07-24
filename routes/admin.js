@@ -186,7 +186,12 @@ router.get('/staff', authenticateAdmin, async (req, res) => {
   }
 });
 
-router.post('/staff', authenticateAdmin, async (req, res) => {
+router.post('/staff', authenticateAdmin, (req, res, next) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Image upload failed' });
+    next();
+  });
+}, async (req, res) => {
   try {
     const { name, username, password, role, chef_code } = req.body;
     if (!name || !username || !password || !role) {
@@ -209,9 +214,10 @@ router.post('/staff', authenticateAdmin, async (req, res) => {
       }
     }
     const hashedPassword = await bcrypt.hash(password, 10);
+    const image = req.file ? '/uploads/' + req.file.filename : null;
     const [result] = await pool.query(
-      'INSERT INTO waiters (name, username, password, role, chef_code, is_active) VALUES (?, ?, ?, ?, ?, 1)',
-      [name, username, hashedPassword, role, role === 'chef' ? chef_code : null]
+      'INSERT INTO waiters (name, username, password, role, chef_code, is_active, image) VALUES (?, ?, ?, ?, ?, 1, ?)',
+      [name, username, hashedPassword, role, role === 'chef' ? chef_code : null, image]
     );
     res.status(201).json({ message: 'Staff created successfully', id: result.insertId });
   } catch (error) {
@@ -220,7 +226,12 @@ router.post('/staff', authenticateAdmin, async (req, res) => {
   }
 });
 
-router.put('/staff/:id', authenticateAdmin, async (req, res) => {
+router.put('/staff/:id', authenticateAdmin, (req, res, next) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Image upload failed' });
+    next();
+  });
+}, async (req, res) => {
   try {
     const { name, username, password, role, chef_code, is_active } = req.body;
     const staffId = req.params.id;
@@ -260,6 +271,10 @@ router.put('/staff/:id', authenticateAdmin, async (req, res) => {
     if (is_active !== undefined) {
       query += ', is_active = ?';
       params.push(is_active ? 1 : 0);
+    }
+    if (req.file) {
+      query += ', image = ?';
+      params.push('/uploads/' + req.file.filename);
     }
     query += ' WHERE id = ?';
     params.push(staffId);

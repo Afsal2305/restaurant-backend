@@ -23,7 +23,22 @@ router.post('/', authenticateAny, async (req, res) => {
   try {
     const { table_id, items, order_type, customer_name, customer_phone, customer_address,
             delivery_charge, packing_charge, parcel_charge, notes, instructions, delivery_boy } = req.body;
-    const waiter_id = req.user.id || req.user.userId;
+    let waiter_id;
+    if (req.user.role === 'admin') {
+      const [adminWaiter] = await pool.query(
+        "SELECT id FROM waiters WHERE username = '__admin__' LIMIT 1"
+      );
+      if (adminWaiter.length > 0) {
+        waiter_id = adminWaiter[0].id;
+      } else {
+        const [result] = await pool.query(
+          "INSERT INTO waiters (name, username, password) VALUES ('Admin', '__admin__', '__placeholder__')"
+        );
+        waiter_id = result.insertId;
+      }
+    } else {
+      waiter_id = req.user.id || req.user.userId;
+    }
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Items are required' });
@@ -172,30 +187,58 @@ router.put('/:orderId', authenticateAny, async (req, res) => {
     }
 
     if (items && Array.isArray(items)) {
+      const [existingItems] = await pool.query(
+        'SELECT id, menu_item_id FROM order_items WHERE order_id = ?',
+        [orderId]
+      );
+      const existingIdSet = new Set(existingItems.map(i => i.id));
+      const processedIds = [];
+
       for (const item of items) {
-        if (item.delete) {
+        if (item.delete && item.id && existingIdSet.has(item.id)) {
           await pool.query('DELETE FROM order_items WHERE id = ? AND order_id = ?', [item.id, orderId]);
-        } else if (item.id) {
+          processedIds.push(item.id);
+        } else if (item.id && existingIdSet.has(item.id)) {
           await pool.query(
-            'UPDATE order_items SET quantity = ?, notes = ?, variant_name = ?, addon_names = ? WHERE id = ? AND order_id = ?',
-            [item.quantity, item.notes || null, item.variant_name || null,
+            'UPDATE order_items SET quantity = ?, price = ?, tax_percentage = ?, notes = ?, variant_name = ?, addon_names = ? WHERE id = ? AND order_id = ?',
+            [item.quantity, item.price, item.tax_percentage || 0, item.notes || null, item.variant_name || null,
              item.addon_names ? JSON.stringify(item.addon_names) : null, item.id, orderId]
           );
+          processedIds.push(item.id);
         } else {
-          const [menuItem] = await pool.query(
-            'SELECT m.*, t.percentage as tax_pct FROM menu_items m LEFT JOIN taxes t ON m.tax_id = t.id WHERE m.id = ?',
-            [item.menu_item_id]
+          const [existingRow] = await pool.query(
+            'SELECT id FROM order_items WHERE order_id = ? AND menu_item_id = ?',
+            [orderId, item.menu_item_id]
           );
-          if (menuItem.length > 0) {
+          if (existingRow.length > 0) {
             await pool.query(
-              `INSERT INTO order_items (order_id, menu_item_id, quantity, price, tax_percentage, notes, variant_name, addon_names)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-              [orderId, item.menu_item_id, item.quantity || 1, menuItem[0].price, menuItem[0].tax_pct || 0,
-               item.notes || null, item.variant_name || null,
-               item.addon_names ? JSON.stringify(item.addon_names) : null]
+              'UPDATE order_items SET quantity = quantity + ?, notes = ?, variant_name = ?, addon_names = ? WHERE id = ?',
+              [item.quantity || 1, item.notes || null, item.variant_name || null,
+               item.addon_names ? JSON.stringify(item.addon_names) : null, existingRow[0].id]
             );
+            processedIds.push(existingRow[0].id);
+          } else {
+            const [menuItem] = await pool.query(
+              'SELECT m.*, t.percentage as tax_pct FROM menu_items m LEFT JOIN taxes t ON m.tax_id = t.id WHERE m.id = ?',
+              [item.menu_item_id]
+            );
+            if (menuItem.length > 0) {
+              const [result] = await pool.query(
+                `INSERT INTO order_items (order_id, menu_item_id, quantity, price, tax_percentage, notes, variant_name, addon_names)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [orderId, item.menu_item_id, item.quantity || 1, menuItem[0].price, menuItem[0].tax_pct || 0,
+                 item.notes || null, item.variant_name || null,
+                 item.addon_names ? JSON.stringify(item.addon_names) : null]
+              );
+              processedIds.push(result.insertId);
+            }
           }
         }
+      }
+
+      const idsToDelete = existingItems.filter(i => !processedIds.includes(i.id)).map(i => i.id);
+      for (const id of idsToDelete) {
+        await pool.query('DELETE FROM order_items WHERE id = ? AND order_id = ?', [id, orderId]);
       }
     }
 
@@ -213,6 +256,42 @@ router.put('/:orderId', authenticateAny, async (req, res) => {
     res.json({ message: 'Order updated successfully' });
   } catch (error) {
     console.error('Update order error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/:orderId/cancel', authenticateAny, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { reason } = req.body;
+    const cancelledBy = req.user?.username || 'User';
+
+    const [orderRows] = await pool.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+    if (orderRows.length === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const order = orderRows[0];
+    if (order.status === 'cancelled') {
+      return res.status(400).json({ error: 'Order is already cancelled' });
+    }
+
+    await pool.query(
+      "UPDATE kot SET status = 'cancelled', cancelled_by = ?, cancelled_at = NOW(), cancel_reason = ? WHERE order_id = ? AND status IN ('pending', 'preparing')",
+      [cancelledBy, reason || null, orderId]
+    );
+
+    await pool.query(
+      'UPDATE orders SET status = ?, cancelled_by = ?, cancelled_at = NOW(), cancel_reason = ? WHERE id = ?',
+      ['cancelled', cancelledBy, reason || null, orderId]
+    );
+
+    if (order.table_id) {
+      await pool.query("UPDATE tables_ SET status = 'open' WHERE id = ?", [order.table_id]);
+    }
+
+    res.json({ message: 'Order cancelled successfully' });
+  } catch (error) {
+    console.error('Cancel order error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -249,6 +328,34 @@ router.get('/active', authenticateAdmin, async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('Get active orders error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.get('/running', authenticateAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT o.*, t.table_number, w.name as waiter_name,
+              (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) as item_count
+       FROM orders o
+       LEFT JOIN tables_ t ON o.table_id = t.id
+       LEFT JOIN waiters w ON o.waiter_id = w.id
+       WHERE o.status = 'active'
+       ORDER BY o.created_at DESC`
+    );
+    for (const order of rows) {
+      const [kots] = await pool.query(
+        `SELECT id, status, kot_number FROM kot WHERE order_id = ? ORDER BY created_at DESC`,
+        [order.id]
+      );
+      order.kots = kots;
+      const kotReadyCount = kots.filter(k => k.status === 'ready').length;
+      order.kot_ready_count = kotReadyCount;
+      order.ready_to_pay = kots.length > 0 && kots.every(k => k.status === 'ready' || k.status === 'served');
+    }
+    res.json(rows);
+  } catch (error) {
+    console.error('Get running orders error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -340,7 +447,16 @@ router.get('/:orderId/items', authenticateAdmin, async (req, res) => {
 router.get('/completed/full', authenticateAdmin, async (req, res) => {
   try {
     const [orders] = await pool.query(
-      `SELECT o.*, t.table_number, w.name as waiter_name
+      `SELECT o.*, t.table_number, w.name as waiter_name,
+              CASE
+                WHEN o.order_type IN ('parcel', 'take_away', 'delivery') THEN 'paid'
+                WHEN EXISTS (SELECT 1 FROM payments WHERE order_id = o.id AND status = 'paid') THEN 'paid'
+                WHEN o.table_id IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM payments p2
+                  WHERE p2.table_id = o.table_id AND p2.status = 'paid'
+                ) THEN 'paid'
+                ELSE 'unpaid'
+              END as payment_status
        FROM orders o
        LEFT JOIN tables_ t ON o.table_id = t.id
        LEFT JOIN waiters w ON o.waiter_id = w.id
@@ -351,15 +467,19 @@ router.get('/completed/full', authenticateAdmin, async (req, res) => {
       const [items] = await pool.query(
         `SELECT oi.*, m.name as menu_item_name, t.name as tax_name
          FROM order_items oi
-         INNER JOIN menu_items m ON oi.menu_item_id = m.id
+         LEFT JOIN menu_items m ON oi.menu_item_id = m.id
          LEFT JOIN taxes t ON m.tax_id = t.id
          WHERE oi.order_id = ?`,
         [order.id]
       );
       order.items = items;
+
       const [payments] = await pool.query(
-        'SELECT * FROM payments WHERE order_id = ?',
-        [order.id]
+        `SELECT * FROM payments WHERE order_id = ?
+         UNION ALL
+         SELECT * FROM payments WHERE table_id = ? AND order_id != ? AND status = 'paid'
+         ORDER BY created_at DESC LIMIT 1`,
+        [order.id, order.table_id, order.id]
       );
       order.payment = payments.length > 0 ? payments[0] : null;
     }
